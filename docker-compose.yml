@@ -1,0 +1,52 @@
+# ReguLens AI — local stack. `make up` (or docker compose up --build), then open http://localhost:8080
+services:
+  db:
+    image: postgres:16
+    environment: { POSTGRES_USER: regulens, POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-regulens}, POSTGRES_DB: regulens }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U regulens"], interval: 5s, retries: 20 }
+    ports: ["5432:5432"]
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment: { MINIO_ROOT_USER: ${S3_ACCESS_KEY:-regulens}, MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-regulens-secret} }
+    volumes: [minio:/data]
+    ports: ["9000:9000", "9001:9001"]
+  minio-init:   # bucket + object lock for the audit anchor bucket
+    image: minio/mc:latest
+    depends_on: [minio]
+    entrypoint: >
+      sh -c "sleep 5; mc alias set m http://minio:9000 $${S3_ACCESS_KEY:-regulens} $${S3_SECRET_KEY:-regulens-secret};
+             mc mb -p m/regulens; mc mb -p --with-lock m/regulens-audit-anchor || true;
+             mc retention set --default COMPLIANCE 3650d m/regulens-audit-anchor || true"
+  clamav:
+    image: clamav/clamav:stable
+    ports: ["3310:3310"]
+  api:
+    build: { context: ., dockerfile: backend/Dockerfile }
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://regulens:${POSTGRES_PASSWORD:-regulens}@db:5432/regulens
+      STORAGE_BACKEND: s3
+      S3_ENDPOINT: http://minio:9000
+      CLAMD_HOST: clamav
+      RUN_SCHEDULER: "0"
+    depends_on: { db: { condition: service_healthy }, minio: { condition: service_started } }
+    ports: ["8000:8000"]
+    volumes: [anchor:/app/infra/audit-anchor]
+  worker:       # durable scheduler (several replicas are safe: FOR UPDATE SKIP LOCKED + leases)
+    build: { context: ., dockerfile: backend/Dockerfile }
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://regulens:${POSTGRES_PASSWORD:-regulens}@db:5432/regulens
+      STORAGE_BACKEND: s3
+      S3_ENDPOINT: http://minio:9000
+      CLAMD_HOST: clamav
+    command: ["python", "-m", "app.cli", "worker"]
+    depends_on: [api]
+    volumes: [anchor:/app/infra/audit-anchor]
+  web:
+    build: { context: ., dockerfile: frontend/Dockerfile }
+    depends_on: [api]
+    ports: ["8080:80"]
+volumes: { pgdata: {}, minio: {}, anchor: {} }

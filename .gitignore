@@ -1,0 +1,13 @@
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.run/
+.env
+uploads/*
+!uploads/.gitkeep
+infra/audit-anchor/*
+!infra/audit-anchor/.gitkeep
+frontend/test-results/
+.hypothesis/
+.pytest_cache/
